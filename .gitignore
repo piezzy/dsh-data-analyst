@@ -1,0 +1,9 @@
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Temporary audit/dev output files
+.*.txt
+.ex-tmp.mjs
+.audit-*.mjs
+prd.md

@@ -1,0 +1,42 @@
+{
+  "name": "dsh-data-analyst",
+  "version": "0.1.0",
+  "description": "Autonomous, evidence-driven data investigation for DeepSeek Harness",
+  "type": "module",
+  "main": "dist/index.js",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "lint": "tsc --noEmit"
+  },
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "data-analyst",
+    "data-investigation"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@deepseek-ai/cordis": "^4.0.4",
+    "@deepseek-ai/dsh-tools": "^0.0.1-rc.1",
+    "papaparse": "^5.4.1",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/papaparse": "^5.3.14",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

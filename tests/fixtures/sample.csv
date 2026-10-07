@@ -1,0 +1,7 @@
+date,product,region,revenue,quantity,is_active
+2024-01-15,Widget A,Jakarta,150000.50,100,true
+2024-01-16,Widget B,Bandung,85000.00,50,false
+2024-01-17,Widget C,Surabaya,230000.75,200,true
+2024-02-01,Widget A,Jakarta,145000.00,95,true
+2024-02-15,Widget B,Bandung,,45,false
+2024-03-01,Widget C,Surabaya,220000.00,180,true
