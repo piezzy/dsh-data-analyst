@@ -23,7 +23,9 @@ export type EvidenceType =
   | "calculation"
   | "profile"
   | "statistic"
-  | "comparison";
+  | "comparison"
+  | "aggregate"
+  | "trend";
 
 export type Evidence = {
   id: string;
@@ -45,6 +47,8 @@ export const EVIDENCE_TYPES: readonly EvidenceType[] = [
   "profile",
   "statistic",
   "comparison",
+  "aggregate",
+  "trend",
 ];
 
 export function isEvidenceType(value: unknown): value is EvidenceType {

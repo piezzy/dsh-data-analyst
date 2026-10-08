@@ -31,7 +31,7 @@ export function defineStartInvestigationTool(deps: StartInvestigationToolDeps) {
       "tracks hypotheses, evidence, and findings for an analytical goal. " +
       "The dataset must already be loaded via inspect_dataset. " +
       "After creating an investigation, propose hypotheses with " +
-      "add_hypothesis-style analysis and record results with record_evidence.",
+      "add_hypothesis and record results with record_evidence.",
 
     parameters: {
       dataset_id: {

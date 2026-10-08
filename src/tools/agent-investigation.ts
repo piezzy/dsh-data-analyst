@@ -33,6 +33,21 @@ import type { DatasetProfile } from "../models/profile.js";
 import type { VerificationResult, EvidenceVerification } from "../models/verification.js";
 import type { InvestigationReport } from "../models/report.js";
 import { DataAnalystError, DatasetNotFoundError } from "../utils/errors.js";
+import {
+  DEFAULT_MAX_EVIDENCE,
+  DEFAULT_MAX_ROUNDS,
+  DeterministicInvestigationPolicy,
+  asValidDecision,
+} from "../loop/policy.js";
+import type {
+  InvestigationPolicy,
+  PolicyEvidenceSummary,
+  PolicyProfileSummary,
+  PolicyVerdict,
+  RefineStrategy,
+} from "../loop/policy.js";
+import type { ReportDataQualityContext } from "../services/report-service.js";
+import type { Evidence } from "../models/evidence.js";
 
 export interface ParsedGoalIntent {
   analysisType: "aggregate" | "compare" | "trend";
@@ -275,9 +290,17 @@ export interface AgentInvestigationToolDeps {
   verificationService: VerificationService;
   analysisEngine: NativeAnalysisEngine;
   reportService?: {
-    generateReport: (investigationId: string) => InvestigationReport;
+    generateReport: (
+      investigationId: string,
+      dataQuality?: ReportDataQualityContext,
+    ) => InvestigationReport;
   };
   markdownRenderer?: { render: (report: InvestigationReport) => string };
+  /**
+   * M9 loop policy. Defaults to the deterministic policy; a future LLM
+   * policy plugs in here without changing the loop driver.
+   */
+  policy?: InvestigationPolicy;
 }
 
 interface HypothesisPlan {
@@ -572,6 +595,151 @@ function generateHypotheses(intent: ParsedGoalIntent, profile: DatasetProfile, d
   return plans;
 }
 
+/**
+ * M10 bounded policy context builders.
+ *
+ * Summaries only: column facts plus top categorical values, and the
+ * latest few evidence digests with truncated one-line result sketches.
+ * Full rows, full profiles, and full trend arrays never leave the
+ * services. Deterministic and small by construction.
+ */
+const MAX_POLICY_EVIDENCE_SUMMARIES = 3;
+const MAX_POLICY_DIGEST_CHARS = 200;
+
+function buildPolicyProfileSummary(
+  profile: DatasetProfile,
+): PolicyProfileSummary {
+  return {
+    columns: profile.metadata.schema.map((s) => {
+      const col = profile.columnProfiles[s.name];
+      const top = col?.categoricalStats?.topValues?.slice(0, 10);
+      return {
+        name: s.name,
+        type: s.type,
+        nullable: s.nullable,
+        missingCount: col?.missingCount ?? 0,
+        ...(top !== undefined ? { topValues: [...top] } : {}),
+      };
+    }),
+  };
+}
+
+function digestPolicyResult(result: unknown): {
+  digest: string;
+  resultRows: number;
+} {
+  if (Array.isArray(result)) {
+    const head = result
+      .slice(0, 2)
+      .map((r) => JSON.stringify(r))
+      .join("; ");
+    return {
+      digest: `${result.length} rows; e.g. ${head}`.slice(
+        0,
+        MAX_POLICY_DIGEST_CHARS,
+      ),
+      resultRows: result.length,
+    };
+  }
+  let digest = "n/a";
+  try {
+    digest = JSON.stringify(result) ?? "n/a";
+  } catch {
+    digest = String(result);
+  }
+  return { digest: digest.slice(0, MAX_POLICY_DIGEST_CHARS), resultRows: 1 };
+}
+
+function buildPolicyEvidenceSummaries(
+  records: Evidence[],
+): PolicyEvidenceSummary[] {
+  return records
+    .slice(-MAX_POLICY_EVIDENCE_SUMMARIES)
+    .reverse()
+    .map((ev) => {
+      const { digest, resultRows } = digestPolicyResult(ev.result);
+      const input = ev.input as Record<string, unknown> | null;
+      const round =
+        typeof input?.["round"] === "number"
+          ? (input["round"] as number)
+          : undefined;
+      return {
+        evidenceId: ev.id,
+        operation: ev.operation,
+        ...(round !== undefined ? { round } : {}),
+        digest,
+        resultRows,
+      };
+    });
+}
+
+/**
+ * M9 deterministic follow-up builder.
+ *
+ * Maps a REFINE decision to a concrete AnalysisEngine request using only
+ * the dataset profile and the last plan — the policy never authors
+ * requests. Returns null when no safe follow-up exists (driver stops).
+ * The new hypothesis is always a fresh H(n+1); the old hypothesis keeps
+ * its verdict and the relationship lives in `rationale`.
+ */
+function buildRefinementPlan(
+  intent: ParsedGoalIntent,
+  profile: DatasetProfile,
+  datasetId: string,
+  lastPlan: HypothesisPlan,
+  lastHypothesisId: string,
+  round: number,
+  strategy: RefineStrategy = "DESCRIPTIVE_FALLBACK",
+): HypothesisPlan | null {
+  const numericColumns = getNumericColumns(profile);
+  const metric = intent.metric || numericColumns[0];
+  if (!metric) return null;
+  const rationale = `Refines ${lastHypothesisId} based on evidence from round ${round}.`;
+
+  // The strategy names the SHAPE; the driver derives every concrete field
+  // from the profile and the last plan. The policy never authors requests.
+  if (strategy === "GROUP_DISTRIBUTION") {
+    const lastRequest = lastPlan.request as Partial<CompareRequest> &
+      Partial<AggregateRequest>;
+    const groupColumn =
+      lastRequest.groupColumn ??
+      lastRequest.groupBy ??
+      intent.groupColumn ??
+      getCategoricalColumns(profile)[0];
+    if (groupColumn) {
+      return {
+        id: "",
+        statement: `Distribution of ${metric} across ${groupColumn} (refinement).`,
+        rationale,
+        analysisType: "aggregate",
+        request: {
+          datasetId,
+          aggregations: [{ column: metric, func: "mean", alias: "mean" }],
+          groupBy: groupColumn,
+        } as AggregateRequest,
+      };
+    }
+    // No groupable column: fall through to the descriptive fallback.
+  }
+
+  // Aggregate and trend fall back to the overall descriptive distribution.
+  return {
+    id: "",
+    statement: `Overall distribution of ${metric} (refinement).`,
+    rationale,
+    analysisType: "aggregate",
+    request: {
+      datasetId,
+      aggregations: [
+        { column: metric, func: "mean", alias: "mean" },
+        { column: metric, func: "sum", alias: "sum" },
+        { column: metric, func: "min", alias: "min" },
+        { column: metric, func: "max", alias: "max" },
+      ],
+    } as AggregateRequest,
+  };
+}
+
 function extractGroupsForComparison(result: unknown, groupColumn: string): string[] {
   if (Array.isArray(result)) {
     return [...new Set(result.map((r: any) => r[groupColumn]).filter(Boolean))];
@@ -662,6 +830,16 @@ export function defineAgentInvestigationTool(deps: AgentInvestigationToolDeps) {
         type: "number",
         description: "Maximum number of hypotheses to test (default: 3).",
       },
+      max_rounds: {
+        type: "number",
+        description:
+          "Maximum investigation loop rounds including refinements (default: 5).",
+      },
+      max_evidence: {
+        type: "number",
+        description:
+          "Maximum evidence records for one investigation (default: 12).",
+      },
     },
 
     output: {
@@ -674,8 +852,12 @@ export function defineAgentInvestigationTool(deps: AgentInvestigationToolDeps) {
       ],
     },
 
-    async execute(args: { path: string; goal: string; max_hypotheses?: number }): Promise<Record<string, any>> {
+    async execute(args: { path: string; goal: string; max_hypotheses?: number; max_rounds?: number; max_evidence?: number }): Promise<Record<string, any>> {
       const { path, goal, max_hypotheses = 3 } = args;
+      const maxRounds = args.max_rounds ?? DEFAULT_MAX_ROUNDS;
+      const maxEvidence = args.max_evidence ?? DEFAULT_MAX_EVIDENCE;
+      const policy: InvestigationPolicy =
+        deps.policy ?? new DeterministicInvestigationPolicy();
 
       const dataset = await deps.datasetService.loadDataset(path);
 
@@ -691,13 +873,25 @@ export function defineAgentInvestigationTool(deps: AgentInvestigationToolDeps) {
       deps.investigationService.transitionTo(investigation.investigationId, "investigating");
 
       const intent = parseGoalIntent(goal, datasetProfile);
-      const hypothesisPlans = generateHypotheses(intent, datasetProfile, dataset.metadata.datasetId).slice(0, max_hypotheses);
+      // M9: seed plans queue. The bounded loop below drains it and may
+      // prepend at most (maxRounds - seeds) deterministic refinements.
+      const queue: HypothesisPlan[] = generateHypotheses(intent, datasetProfile, dataset.metadata.datasetId).slice(0, max_hypotheses);
 
       const evidenceIds: string[] = [];
       const hypothesisIds: string[] = [];
       const claimOutcomes: Array<{ analysisType: "aggregate" | "compare" | "trend"; request: AggregateRequest | CompareRequest | TrendRequest; result: unknown }> = [];
+      let round = 0;
+      let consecutiveRoundsWithoutEvidence = 0;
+      let lastVerdict: PolicyVerdict | null = null;
+      let lastAnalysisType: "aggregate" | "compare" | "trend" | null = null;
+      let lastPlan: HypothesisPlan | null = null;
+      let lastHypothesisId: string | null = null;
 
-      for (const plan of hypothesisPlans) {
+      while (queue.length > 0) {
+        if (evidenceIds.length >= maxEvidence) break;
+        if (round >= maxRounds) break;
+        const plan = queue.shift()!;
+        round += 1;
         const hypothesis = deps.investigationService.addHypothesis(
           investigation.investigationId,
           plan.statement,
@@ -710,7 +904,15 @@ export function defineAgentInvestigationTool(deps: AgentInvestigationToolDeps) {
           "testing",
         );
 
-        const request = { ...plan.request, datasetId: dataset.metadata.datasetId };
+        // Additive M9 loop metadata. The engine reads only its known
+        // request fields and ignores the rest; verification re-runs the
+        // same input through the same engine, so reproducibility holds.
+        const request = {
+          ...plan.request,
+          datasetId: dataset.metadata.datasetId,
+          round,
+          hypothesisId: hypothesis.id,
+        };
 
         let analysisResult: any;
         try {
@@ -740,11 +942,32 @@ export function defineAgentInvestigationTool(deps: AgentInvestigationToolDeps) {
             analysisResult = await deps.analysisEngine.trend(request as TrendRequest);
           }
 
+          // The engine has no time-period filter. When the goal named a
+          // period, record it as structured input metadata so the report
+          // can state the full-range caveat deterministically. The engine
+          // ignores unknown input fields; verification replays identically.
+          const evidenceInput = {
+            ...request,
+            ...(plan.analysisType === "trend" &&
+            intent.timePeriod !== undefined
+              ? { unfilteredPeriod: intent.timePeriod }
+              : {}),
+          };
+          // Evidence kind matches the reproducible operation: aggregate and
+          // trend results carry their own kinds; comparisons stay
+          // "comparison". Verification replays `operation`, so kinds and
+          // operations remain aligned end to end.
+          const evidenceKind =
+            plan.analysisType === "aggregate"
+              ? "aggregate"
+              : plan.analysisType === "trend"
+                ? "trend"
+                : "comparison";
           const evidence = deps.evidenceService.recordEvidence(
             investigation.investigationId,
-            plan.analysisType === "trend" ? "statistic" : "comparison",
+            evidenceKind,
             plan.analysisType,
-            request,
+            evidenceInput,
             analysisResult.result,
           );
           evidenceIds.push(evidence.id);
@@ -762,12 +985,72 @@ export function defineAgentInvestigationTool(deps: AgentInvestigationToolDeps) {
             hypothesis.id,
             verdict,
           );
+          consecutiveRoundsWithoutEvidence = 0;
+          lastVerdict = verdict;
         } catch (err) {
           deps.investigationService.setHypothesisStatus(
             investigation.investigationId,
             hypothesis.id,
             "rejected",
           );
+          consecutiveRoundsWithoutEvidence += 1;
+          lastVerdict = "rejected";
+        }
+        lastAnalysisType = plan.analysisType;
+        lastPlan = plan;
+        lastHypothesisId = hypothesis.id;
+
+        // M9 loop decision. The policy is data-only; any invalid or
+        // throwing policy degrades to STOP, never to execution.
+        // M10: awaited, so async (LLM) policies plug in unchanged while
+        // synchronous policies keep working (await on a value is a no-op).
+        let decision;
+        try {
+          const current = deps.investigationService.getInvestigation(
+            investigation.investigationId,
+          );
+          decision = asValidDecision(
+            await policy.decide({
+              goal,
+              round,
+              maxRounds,
+              maxEvidence,
+              hypotheses: current.hypotheses.map((h) => ({
+                id: h.id,
+                statement: h.statement,
+                status: h.status,
+                rationale: h.rationale,
+              })),
+              pendingPlans: queue.length,
+              evidenceCount: evidenceIds.length,
+              lastVerdict,
+              lastAnalysisType,
+              consecutiveRoundsWithoutEvidence,
+              profileSummary: buildPolicyProfileSummary(datasetProfile),
+              evidenceSummaries: buildPolicyEvidenceSummaries(
+                deps.evidenceService.getEvidenceForInvestigation(
+                  investigation.investigationId,
+                ),
+              ),
+            }),
+          );
+        } catch {
+          decision = asValidDecision(undefined);
+        }
+        if (decision.kind === "STOP") break;
+        if (decision.kind === "REFINE") {
+          if (lastPlan === null || lastHypothesisId === null) break;
+          const followUp = buildRefinementPlan(
+            intent,
+            datasetProfile,
+            dataset.metadata.datasetId,
+            lastPlan,
+            lastHypothesisId,
+            round,
+            decision.strategy,
+          );
+          if (followUp === null) break;
+          queue.unshift(followUp);
         }
       }
 
@@ -807,6 +1090,12 @@ export function defineAgentInvestigationTool(deps: AgentInvestigationToolDeps) {
       if (deps.reportService && deps.markdownRenderer) {
         const structured = deps.reportService.generateReport(
           investigation.investigationId,
+          // Profiling counts computed before the run; the report only
+          // renders them as limitations, never analyzes.
+          {
+            duplicateRows: datasetProfile.duplicateRows,
+            missingValues: datasetProfile.missingValues,
+          },
         );
         reportField = {
           structured,

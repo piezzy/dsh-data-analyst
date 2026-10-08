@@ -11,6 +11,21 @@ import type {
 import type { DatasetService } from '../services/dataset-service.js';
 import { AnalysisError } from '../utils/errors.js';
 
+/**
+ * Engine-wide missing convention, shared with profiling and type
+ * detection: null, undefined, empty string, and whitespace-only
+ * strings carry no value. In particular `Number('   ') === 0`, so
+ * whitespace must be excluded BEFORE numeric coercion, or blank
+ * cells become phantom zeros in sum/mean/min/max.
+ */
+function isMissingValue(value: unknown): boolean {
+  return (
+    value === null ||
+    value === undefined ||
+    (typeof value === 'string' && value.trim() === '')
+  );
+}
+
 export class NativeAnalysisEngine implements AnalysisEngine {
   constructor(private readonly datasetService: DatasetService) {}
 
@@ -220,15 +235,14 @@ export class NativeAnalysisEngine implements AnalysisEngine {
     if (func === 'count') {
       let c = 0;
       for (const row of rows) {
-        const val = row[column];
-        if (val !== null && val !== undefined && val !== '') c++;
+        if (!isMissingValue(row[column])) c++;
       }
       return c;
     }
 
     const numericValues = rows
       .map(r => r[column])
-      .filter(v => v !== null && v !== undefined && v !== '')
+      .filter(v => !isMissingValue(v))
       .map(v => Number(v))
       .filter(n => !isNaN(n));
 

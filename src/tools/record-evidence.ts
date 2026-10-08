@@ -27,8 +27,10 @@ export function defineRecordEvidenceTool(deps: RecordEvidenceToolDeps) {
     description:
       "Record a piece of evidence for an investigation. Evidence is the " +
       "reproducible output of a deterministic computation (query, calculation, " +
-      "profile, statistic, or comparison). Record the operation name, the input " +
-      "context, and the result. Every finding must reference evidence.",
+      "profile, statistic, comparison, aggregate, or trend). Record the operation " +
+      "name, the input context, and the result. The aggregate, compare, and trend " +
+      "operations can be deterministically re-executed during verification; " +
+      "every finding must reference evidence.",
 
     parameters: {
       investigation_id: {

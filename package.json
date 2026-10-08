@@ -8,6 +8,17 @@
     ".": {
       "import": "./dist/index.js",
       "types": "./dist/index.d.ts"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist/",
+    "cordis.patch.yml"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
     }
   },
   "scripts": {
@@ -26,7 +37,7 @@
   "license": "MIT",
   "dependencies": {
     "@deepseek-ai/cordis": "^4.0.4",
-    "@deepseek-ai/dsh-tools": "^0.0.1-rc.1",
+    "@deepseek-ai/dsh-tools": "0.2.0-rc.2",
     "papaparse": "^5.4.1",
     "xlsx": "^0.18.5"
   },

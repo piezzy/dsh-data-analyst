@@ -1,0 +1,5 @@
+# dsh-data-analyst bundle layer: registers this package's Host plugin row.
+# Applied by the profile installer after the bundle's own layer selection.
+- insert:
+    - id: dsh-data-analyst
+      name: dsh-data-analyst

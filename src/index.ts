@@ -10,6 +10,8 @@
  * Registered tools:
  *   - inspect_dataset (M2): load + profile a dataset
  *   - start_investigation (M4): create an investigation for a dataset
+ *   - add_hypothesis (M13.4): propose a testable hypothesis
+ *   - transition_investigation (M13.4): move through required states
  *   - record_evidence (M4): record deterministic evidence for an investigation
  *   - get_investigation (M4): read back an investigation + its evidence
  *   - record_finding (M5): record an evidence-backed finding
@@ -39,6 +41,8 @@ import { ReportService } from "./services/report-service.js";
 import { MarkdownReportRenderer } from "./services/markdown-report-renderer.js";
 import { NativeAnalysisEngine } from "./engines/native-engine.js";
 import { defineStartInvestigationTool } from "./tools/start-investigation.js";
+import { defineAddHypothesisTool } from "./tools/add-hypothesis.js";
+import { defineTransitionInvestigationTool } from "./tools/transition-investigation.js";
 import { defineRecordEvidenceTool } from "./tools/record-evidence.js";
 import { defineGetInvestigationTool } from "./tools/get-investigation.js";
 import { defineRecordFindingTool } from "./tools/record-finding.js";
@@ -139,6 +143,24 @@ export function apply(ctx: Context): void {
   // through the investigation workflow tools.
   ctx.tools.register(
     defineStartInvestigationTool({ datasetService, investigationService }),
+  );
+
+  // ── Tool: add_hypothesis (M13.4, PRD §14) ───────────────────────────
+  //
+  // Proposes one testable hypothesis for an investigation. Exposes the
+  // hypothesis step of the workflow so external agents can orchestrate
+  // investigations discretely instead of only via run_investigation.
+  ctx.tools.register(
+    defineAddHypothesisTool({ investigationService }),
+  );
+
+  // ── Tool: transition_investigation (M13.4, PRD §19) ─────────────────
+  //
+  // Moves an investigation through its required states
+  // (planning → investigating → verifying → completed, or failed).
+  // Invalid transitions are rejected by the state machine.
+  ctx.tools.register(
+    defineTransitionInvestigationTool({ investigationService }),
   );
 
   // ── Tool: record_evidence (M4, PRD §15) ───────────────────────────

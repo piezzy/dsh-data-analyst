@@ -24,6 +24,19 @@ import type { FindingService } from "./finding-service.js";
 import type { InvestigationService } from "./investigation-service.js";
 import type { VerificationService } from "./verification-service.js";
 
+/**
+ * Dataset facts a caller may attach for limitation rendering.
+ * Every field is a precomputed count from profiling the dataset
+ * before the investigation ran — the report performs no analysis
+ * of its own. All fields optional; absent fields render nothing.
+ */
+export interface ReportDataQualityContext {
+  /** Rows identical to another row, as counted by profiling. */
+  duplicateRows?: number | undefined;
+  /** Missing (null/empty) value counts by column, in schema order. */
+  missingValues?: Record<string, number> | undefined;
+}
+
 export class ReportService {
   constructor(
     private readonly investigationService: InvestigationService,
@@ -35,9 +48,17 @@ export class ReportService {
   /**
    * Assemble a snapshot report for an investigation.
    *
+   * @param dataQuality - optional dataset facts the caller already
+   *   computed (e.g. from profiling before the investigation ran).
+   *   The report never profiles or analyzes; it only renders the
+   *   provided counts as limitations. Omit it to keep the
+   *   pre-M13.3 behavior.
    * @throws InvestigationNotFoundError if the investigation does not exist
    */
-  generateReport(investigationId: string): InvestigationReport {
+  generateReport(
+    investigationId: string,
+    dataQuality?: ReportDataQualityContext,
+  ): InvestigationReport {
     // Validates existence; throws InvestigationNotFoundError when unknown.
     const investigation =
       this.investigationService.getInvestigation(investigationId);
@@ -111,7 +132,12 @@ export class ReportService {
       findings,
       verification,
       summary: this.buildSummary(findings, verification),
-      limitations: this.buildLimitations(investigationId, findings),
+      limitations: this.buildLimitations(
+        investigation.hypotheses.map((h) => ({ id: h.id, status: h.status })),
+        evidence,
+        findings,
+        dataQuality,
+      ),
     };
   }
 
@@ -150,14 +176,25 @@ export class ReportService {
   }
 
   /**
-   * Limitations represented by existing state only. Currently that
-   * is the set of unverified findings: when a finding has not been
-   * deterministically verified, the report states that fact rather
-   * than inventing data-quality caveats.
+   * Limitations explicitly represented by existing investigation /
+   * evidence state. Every rule below reads recorded state only:
+   *
+   * - finding verification outcomes (unverified / rejected)
+   * - hypothesis terminal states (inconclusive)
+   * - trend evidence carrying the caller-recorded `unfilteredPeriod`
+   *   marker (the engine has no period filter; the marker is written
+   *   when the goal requested a period)
+   * - caller-provided profiling counts (duplicate rows, per-column
+   *   missing values the engine skips during aggregation)
+   *
+   * Deterministic and ordered: findings, hypotheses, evidence, then
+   * data-quality facts. Empty when none apply ("None identified").
    */
   private buildLimitations(
-    _investigationId: string,
+    hypotheses: ReadonlyArray<{ id: string; status: string }>,
+    evidence: ReportEvidence[],
     findings: ReportFinding[],
+    dataQuality?: ReportDataQualityContext,
   ): string[] {
     const limitations: string[] = [];
     for (const finding of findings) {
@@ -165,6 +202,51 @@ export class ReportService {
         limitations.push(
           `Finding ${finding.id} is unverified and should not be treated as a confirmed conclusion.`,
         );
+      } else if (finding.verificationStatus === "rejected") {
+        limitations.push(
+          `Finding ${finding.id} was rejected during verification and should not be treated as a confirmed conclusion.`,
+        );
+      }
+    }
+    for (const hypothesis of hypotheses) {
+      if (hypothesis.status === "inconclusive") {
+        limitations.push(
+          `Hypothesis ${hypothesis.id} ended inconclusive: the recorded evidence neither supported nor rejected it.`,
+        );
+      }
+    }
+    const reportedPeriods = new Set<string>();
+    for (const item of evidence) {
+      const input = item.input as { unfilteredPeriod?: unknown } | null;
+      const period =
+        typeof input?.unfilteredPeriod === "string" &&
+        input.unfilteredPeriod.trim() !== ""
+          ? input.unfilteredPeriod.trim()
+          : null;
+      if (period !== null && !reportedPeriods.has(period)) {
+        reportedPeriods.add(period);
+        limitations.push(
+          `Requested time period "${period}" could not be applied by the analysis engine; the trend covers the full data range.`,
+        );
+      }
+    }
+    if (
+      dataQuality?.duplicateRows !== undefined &&
+      dataQuality.duplicateRows > 0
+    ) {
+      const n = dataQuality.duplicateRows;
+      limitations.push(
+        `Dataset contains ${n} duplicate row${n === 1 ? "" : "s"}; aggregates count duplicate rows as recorded.`,
+      );
+    }
+    const missing = dataQuality?.missingValues;
+    if (missing !== undefined) {
+      for (const [column, count] of Object.entries(missing)) {
+        if (typeof count === "number" && count > 0) {
+          limitations.push(
+            `Column '${column}' has ${count} missing value${count === 1 ? "" : "s"}; missing values are excluded from aggregations.`,
+          );
+        }
       }
     }
     return limitations;
